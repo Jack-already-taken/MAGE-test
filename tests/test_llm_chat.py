@@ -6,8 +6,8 @@ from mage.log_utils import get_logger
 logger = get_logger(__name__)
 
 args_dict = {
-    "provider": "vertexanthropic",
-    "model": "claude-3-7-sonnet@20250219",
+    "provider": "openai",
+    "model": "gpt-5",
     "n": 1,
     "temperature": 0.85,
     "top_p": 0.95,

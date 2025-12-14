@@ -12,6 +12,7 @@ logger = get_logger(__name__)
 class TypeBenchmark(Enum):
     VERILOG_EVAL_V1 = 1
     VERILOG_EVAL_V2 = 2
+    VERILOG_EVAL_DEBUG = 3
 
 
 class TypeBenchmarkFile(Enum):
@@ -41,12 +42,16 @@ def get_benchmark_contents(
     if (
         benchmark_type == TypeBenchmark.VERILOG_EVAL_V1
         or benchmark_type == TypeBenchmark.VERILOG_EVAL_V2
+        or benchmark_type == TypeBenchmark.VERILOG_EVAL_DEBUG
     ):
+        # FIXED: Corrected the nested ternary operator
         folder = os.path.join(
             benchmark_repo,
             (
                 "dataset_code-complete-iccad2023"
                 if benchmark_type == TypeBenchmark.VERILOG_EVAL_V1
+                else "dataset_rtl-debug"
+                if benchmark_type == TypeBenchmark.VERILOG_EVAL_DEBUG
                 else "dataset_spec-to-rtl"
             ),
         )

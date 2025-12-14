@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import csv
 import traceback
 from typing import List, Tuple
 
@@ -13,6 +14,7 @@ from .sim_judge import SimJudge
 from .sim_reviewer import SimReviewer
 from .tb_generator import TBGenerator
 from .token_counter import TokenCounter, TokenCounterCached
+from .bash_tools import run_bash_command
 
 logger = get_logger(__name__)
 
@@ -193,6 +195,19 @@ class TopAgent:
                 rtl_code, sim_mismatch_cnt, sim_log = candidates_info_unique[i]
                 with open(f"{self.output_dir_per_run}/rtl.sv", "w") as f:
                     f.write(rtl_code)
+                
+                # Inserted new code: concatinate waveform table to the sim log
+                # table_passed, command_out = run_bash_command("python waveform.py")
+                # logger.info(f"Waveform command pass: {table_passed}; output: {command_out}")
+                # if table_passed:
+                #     with open("wave_cycles.csv", "r") as csvfile:
+                #         reader = csv.reader(csvfile)
+                #         waveform_table = "\n".join([", ".join(row) for row in reader])
+                #     sim_log += "\n\nWaveform Cycles:\n" + waveform_table
+                # else:
+                #     sim_log += "\n\nWaveform Cycles:\nFailed to generate waveform table.\n"
+                # End of inserted code
+
                 self.rtl_edit.reset()
                 is_sim_pass, rtl_code = self.rtl_edit.chat(
                     spec=spec,
@@ -288,4 +303,225 @@ class TopAgent:
             content = re.sub(r"\[.*?m", "", content)
             with open(f"{log_dir_per_run}/mage_rtl_rich_free.log", "w") as f:
                 f.write(content)
+        return result
+
+def extract_verilog_module_from_text(text: str) -> str:
+    """
+    Extract the first Verilog module definition from a mixed natural-language
+    + code prompt.
+
+    Strategy: grab lines from the first line containing 'module' up to and
+    including the first line containing 'endmodule'.
+
+    Raises ValueError if no module is found.
+    """
+    lines = text.splitlines()
+    in_module = False
+    code_lines: list[str] = []
+
+    for line in lines:
+        if not in_module:
+            if re.search(r"\bmodule\b", line):
+                in_module = True
+                code_lines.append(line)
+        else:
+            code_lines.append(line)
+            if re.search(r"\bendmodule\b", line):
+                break
+
+    if not code_lines:
+        raise ValueError("No Verilog module found in debug prompt text")
+
+    # Normalize with a trailing newline for convenience
+    return "\n".join(code_lines).strip() + "\n"
+
+
+class DebugAgent(TopAgent):
+    """
+    Debug-only agent that:
+      - Takes a combined natural-language + buggy-code prompt (from *_debug_prompt.txt).
+      - Extracts the buggy RTL from that prompt and writes it to rtl.sv.
+      - Generates/uses a testbench.
+      - Runs simulation + RTLEditor in multiple rounds until pass / max rounds.
+    """
+
+    def __init__(self, llm: LLM, debug_max_rounds: int = 5):
+        super().__init__(llm)
+        self.debug_max_rounds = debug_max_rounds
+
+    def run_debug_instance(
+        self,
+        debug_prompt: str,
+        max_debug_rounds: int | None = None,
+    ) -> Tuple[bool, str]:
+        """
+        Run a single debug instance given a single combined prompt.
+
+        Args:
+            debug_prompt: full contents of *_debug_prompt.txt (NL + code).
+            max_debug_rounds: override self.debug_max_rounds if not None.
+
+        Returns:
+            (is_pass, rtl_code):
+                - is_pass: whether final RTL passes simulation
+                - rtl_code: final RTL after editing
+        """
+        assert self.sim_reviewer is not None
+        assert self.tb_gen is not None
+        assert self.rtl_edit is not None
+
+        # 1) Use the full debug_prompt as the "spec" fed to TBGenerator & RTLEditor
+        spec_text = debug_prompt
+
+        # 2) Extract the buggy RTL module from the prompt
+        buggy_rtl_code = extract_verilog_module_from_text(debug_prompt)
+        logger.info("Extracted buggy RTL from debug prompt:")
+        logger.info(buggy_rtl_code)
+
+        # 3) Generate or load testbench (same style as TopAgent)
+        self.tb_gen.reset()
+        self.tb_gen.set_golden_tb_path(self.golden_tb_path)
+        if not self.golden_tb_path:
+            logger.info("No golden testbench provided to DebugAgent")
+        testbench, interface = self.tb_gen.chat(spec_text)
+        logger.info("DebugAgent TB:")
+        logger.info(testbench)
+        logger.info("DebugAgent IF:")
+        logger.info(interface)
+        self.write_output(testbench, "tb.sv")
+        self.write_output(interface, "if.sv")
+
+        # 4) Write initial buggy RTL to rtl.sv and run first simulation
+        rtl_code = buggy_rtl_code
+        self.write_output(rtl_code, "rtl.sv")
+
+        is_sim_pass, sim_mismatch_cnt, sim_log = self.sim_reviewer.review()
+        if is_sim_pass:
+            logger.info("Initial buggy RTL already passes simulation; nothing to fix.")
+            return True, rtl_code
+
+        rounds = max_debug_rounds or self.debug_max_rounds
+        logger.info(f"Starting DebugAgent debug loop for up to {rounds} rounds")
+
+        # 5) Multi-round debug loop:
+        #    sim -> RTLEditor -> new RTL -> sim -> ...
+        for i in range(rounds):
+            logger.info(f"[Debug round {i + 1}/{rounds}]")
+            logger.info(f"Current mismatch count: {sim_mismatch_cnt}")
+            logger.info("Simulation log for this round:")
+            logger.info(sim_log)
+
+            # Reset RTLEditor state and ask it to fix the RTL based on spec + sim log
+            self.rtl_edit.reset()
+            is_sim_pass, rtl_code = self.rtl_edit.chat(
+                spec=spec_text,
+                output_dir_per_run=self.output_dir_per_run,
+                sim_failed_log=sim_log,
+                sim_mismatch_cnt=sim_mismatch_cnt,
+            )
+
+            # Persist edited RTL
+            self.write_output(rtl_code, "rtl.sv")
+
+            if is_sim_pass:
+                logger.info("RTLEditor reports simulation pass after editing.")
+                return True, rtl_code
+
+            # Re-simulate with the new RTL to get fresh logs for the next round
+            is_sim_pass, sim_mismatch_cnt, sim_log = self.sim_reviewer.review()
+            if is_sim_pass:
+                logger.info("Simulation passes after applying RTLEditor patch.")
+                return True, rtl_code
+
+        logger.info("Reached maximum debug rounds; RTL still failing.")
+        return False, rtl_code
+
+    def _run_debug(
+        self,
+        debug_prompt: str,
+        max_debug_rounds: int | None = None,
+    ) -> Tuple[bool, str]:
+        """
+        Internal entry for debug-only mode.
+        Sets up SimReviewer/TBGenerator/RTLEditor and calls run_debug_instance().
+        """
+        try:
+            if os.path.exists(f"{self.output_dir_per_run}/properly_finished.tag"):
+                os.remove(f"{self.output_dir_per_run}/properly_finished.tag")
+            self.token_counter.reset()
+
+            # Components needed: sim reviewer, TB generator, RTL editor
+            self.sim_reviewer = SimReviewer(
+                self.output_dir_per_run,
+                self.golden_rtl_blackbox_path,
+            )
+            self.tb_gen = TBGenerator(self.token_counter)
+            self.rtl_edit = RTLEditor(
+                self.token_counter, sim_reviewer=self.sim_reviewer
+            )
+
+            ret = self.run_debug_instance(
+                debug_prompt=debug_prompt,
+                max_debug_rounds=max_debug_rounds,
+            )
+
+            self.token_counter.log_token_stats()
+            with open(f"{self.output_dir_per_run}/properly_finished.tag", "w") as f:
+                f.write("1")
+        except Exception:
+            exc_info = sys.exc_info()
+            traceback.print_exception(*exc_info)
+            ret = False, f"Exception: {exc_info[1]}"
+        return ret
+
+    def run_debug(
+        self,
+        benchmark_type_name: str,
+        task_id: str,
+        debug_prompt: str,
+        golden_tb_path: str | None = None,
+        golden_rtl_blackbox_path: str | None = None,
+        max_debug_rounds: int | None = None,
+    ) -> Tuple[bool, str]:
+        """
+        Public entry point for DebugAgent.
+
+        Args:
+            benchmark_type_name: e.g., "VERILOG_EVAL_V2". Used in paths/logs.
+            task_id: benchmark instance id (same role as in TopAgent.run()).
+            debug_prompt: full contents of *_debug_prompt.txt (NL + buggy code).
+            golden_tb_path: optional golden TB to guide TBGenerator.
+            golden_rtl_blackbox_path: same meaning as in TopAgent.
+            max_debug_rounds: override self.debug_max_rounds if provided.
+
+        Returns:
+            (is_pass, final_rtl_code)
+        """
+        self.golden_tb_path = golden_tb_path
+        self.golden_rtl_blackbox_path = golden_rtl_blackbox_path
+
+        log_dir_per_run = f"{self.log_path}/{benchmark_type_name}_{task_id}"
+        self.output_dir_per_run = f"{self.output_path}/{benchmark_type_name}_{task_id}"
+        os.makedirs(self.output_path, exist_ok=True)
+        os.makedirs(self.output_dir_per_run, exist_ok=True)
+        set_log_dir(log_dir_per_run)
+
+        if self.redirect_log:
+            with open(f"{log_dir_per_run}/mage_rtl.log", "w") as f:
+                sys.stdout = f
+                sys.stderr = f
+                result = self._run_debug(debug_prompt, max_debug_rounds)
+            sys.stdout = sys.__stdout__
+            sys.stderr = sys.__stderr__
+        else:
+            result = self._run_debug(debug_prompt, max_debug_rounds)
+
+        # Provide a rich-text-free log, same as TopAgent.run()
+        if self.redirect_log:
+            with open(f"{log_dir_per_run}/mage_rtl.log", "r") as f:
+                content = f.read()
+            content = re.sub(r"\x1b\[.*?m", "", content)
+            with open(f"{log_dir_per_run}/mage_rtl_rich_free.log", "w") as f:
+                f.write(content)
+
         return result

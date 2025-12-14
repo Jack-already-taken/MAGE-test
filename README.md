@@ -1,7 +1,6 @@
-# MAGE: A Multi-Agent Engine for Automated RTL Code Generation
+# Debugging Agent Implementation Based on MAGE Framework
 
-You can learn more on our Arxiv Paper: https://arxiv.org/abs/2412.07822.
-MAGE is an open-source multi-agent LLM RTL code generator.
+Link to original repository: https://arxiv.org/abs/2412.07822
 
 ![DAC-overview](fig/DAC-overview.png)
 
@@ -107,8 +106,13 @@ git submodule update --init --recursive
 ```
 
 ## Run Guide
+For original MAGE agent:
 ```
 python tests/test_top_agent.py
+```
+For Debugging Agent:
+```
+python tests/test_debug_agent.py
 ```
 
 Run arguments can be set in the file like:
@@ -145,11 +149,34 @@ Where each argument means:
 10. max_token: Maximum number of tokens the model is allowed to generate in its output.
 11. key_cfg_path: Path to your key.cfg file. Defaulted to be under MAGE
 
+### Key evaluation scripts and reports
+- tests/result_analysis.py — primary evaluation/aggregation utilities (use to summarize runs and compare results).
+- tests/test_top_agent.py — end-to-end run for the original MAGE agent (use to reproduce baseline behavior).
+- tests/test_debug_agent.py — end-to-end run for the debugging agent.
+- projects/MAGE/tests/find_merged.py — combined log checks and rounds analysis (produces JSON/text reports).
+- Generated report files (when running checks/analysis):
+  - test_check_results.json / test_check_results.txt — summary of log presence, simulation pass/fail, and basic statistics.
+  - rtl_editor_rounds_analysis.json — detailed statistics on editing rounds, success per test, distributions.
+  - rtl_editor_rounds_report.txt — human-readable detailed report.
 
-## Development Guide
+### Typical metrics to inspect
+- Simulation pass rate: fraction of tests whose simulation passed (primary functional metric).
+- Success rate of debugging agent: fraction of cases where the agent produced a correct/final passing testbench.
+- Average / min / max editing rounds: how many iterations the RTL editor used before success/failure.
 
-Run editable install and setup pre-commit like:
-```
-pip install -e . --config-settings editable_mode=compat
-pre-commit install
-```
+### How to run evaluation & generate reports
+1. Run a full agent test (example for debug agent):
+   ```
+   python tests/test_debug_agent.py
+   ```
+   This produces per-test logs and simulation outputs under the tests' configured output directories.
+
+2. Run the merged log + rounds analysis (recommended after test run):
+   ```
+   python projects/MAGE/tests/result_analysis.py \
+     --log-dir ./tests/log_test_all_0 \
+     --debug-log-dir ./projects/MAGE/tests/log_test_debug_all_0 \
+     --output-folders-dir ./tests/output_test_all_0 \
+     --out-dir ./reports
+   ```
+   Output files will be written into ./reports (or the --out-dir you specify).

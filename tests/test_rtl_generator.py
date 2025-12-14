@@ -16,14 +16,14 @@ from mage.token_counter import TokenCounter, TokenCounterCached
 logger = get_logger(__name__)
 
 args_dict = {
-    "provider": "vertexanthropic",
-    "model": "claude-3-7-sonnet@20250219",
+    "provider": "openai",
+    "model": "gpt-5",
     "filter_instance": "^(Prob070_ece241_2013_q2|Prob151_review2015_fsm)$",
     "type_benchmark": "verilog_eval_v2",
     "path_benchmark": "./verilog-eval",
     "temperature": 0.85,
     "top_p": 0.95,
-    "max_token": 8192,
+    "max_token": 4096,
     "key_cfg_path": "./key.cfg",
 }
 
